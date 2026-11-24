@@ -220,18 +220,70 @@ body.plan-mode .note{display:none}
 <script>
   setTimeout(function(){ if(!window.__barao){ var t=document.getElementById('ldTxt'); if(t) t.textContent='Não foi possível carregar o 3D. Verifique a conexão e recarregue a página.'; } }, 15000);
 </script>
-<script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-} }
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<script>
+window.addEventListener('error', function(e){ var t = document.getElementById('ldTxt'); if (t && !document.getElementById('loader').classList.contains('done')) t.textContent = 'Erro ao iniciar o 3D: ' + (e.message || 'desconhecido'); });
 </script>
-<script type="module">
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-
+<script>
+(function(){
+if (!window.THREE) return;
 window.__barao = true;
+
+/* Orbit camera: drag to rotate, wheel or pinch to zoom, with damping and auto-rotate. */
+class Orbit {
+  constructor(cam, el){
+    this.cam = cam; this.el = el; this.target = new THREE.Vector3();
+    this.enabled = true; this.enableDamping = true; this.dampingFactor = .08;
+    this.autoRotate = false; this.autoRotateSpeed = .35;
+    this.minDistance = 1; this.maxDistance = 1e4; this.minPolarAngle = .05; this.maxPolarAngle = Math.PI / 2;
+    this.dTheta = 0; this.dPhi = 0; this.scale = 1; this.ptrs = new Map(); this.pinch = 0;
+    this.sph = new THREE.Spherical(); this.off = new THREE.Vector3();
+    el.addEventListener('pointerdown', e => {
+      if (!this.enabled) return;
+      try { el.setPointerCapture(e.pointerId); } catch (_) {}
+      this.ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.ptrs.size === 2) this.pinch = this.pdist();
+    });
+    el.addEventListener('pointermove', e => {
+      const p = this.ptrs.get(e.pointerId); if (!p) return;
+      if (this.enabled && this.ptrs.size === 1) {
+        const k = 2 * Math.PI / Math.max(1, el.clientHeight);
+        this.dTheta -= (e.clientX - p.x) * k; this.dPhi -= (e.clientY - p.y) * k;
+      }
+      p.x = e.clientX; p.y = e.clientY;
+      if (this.ptrs.size === 2) { const d = this.pdist(); if (this.enabled && this.pinch > 0 && d > 0) this.scale *= this.pinch / d; this.pinch = d; }
+    });
+    const up = e => { this.ptrs.delete(e.pointerId); this.pinch = this.ptrs.size === 2 ? this.pdist() : 0; };
+    el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
+    el.addEventListener('wheel', e => { e.preventDefault(); if (!this.enabled) return; this.scale *= e.deltaY > 0 ? 1.08 : 1 / 1.08; }, { passive: false });
+  }
+  pdist(){ const a = [...this.ptrs.values()]; return Math.hypot(a[0].x - a[1].x, a[0].y - a[1].y); }
+  reset(){ this.dTheta = 0; this.dPhi = 0; this.scale = 1; }
+  update(){
+    this.off.copy(this.cam.position).sub(this.target);
+    this.sph.setFromVector3(this.off);
+    if (this.autoRotate && this.ptrs.size === 0) this.dTheta -= 2 * Math.PI / 3600 * this.autoRotateSpeed;
+    const f = this.enableDamping ? this.dampingFactor : 1;
+    this.sph.theta += this.dTheta * f; this.sph.phi += this.dPhi * f;
+    this.sph.phi = Math.min(this.maxPolarAngle, Math.max(this.minPolarAngle, this.sph.phi)); this.sph.makeSafe();
+    this.sph.radius = Math.min(this.maxDistance, Math.max(this.minDistance, this.sph.radius * Math.pow(this.scale, f)));
+    this.dTheta *= 1 - f; this.dPhi *= 1 - f; this.scale = Math.pow(this.scale, 1 - f);
+    this.off.setFromSpherical(this.sph);
+    this.cam.position.copy(this.target).add(this.off);
+    this.cam.lookAt(this.target);
+  }
+}
+
+/* Small studio room used as image-based lighting. */
+function makeEnv(pmrem){
+  const s = new THREE.Scene();
+  s.add(new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10), new THREE.MeshBasicMaterial({ color: 0x6f747c, side: THREE.BackSide })));
+  const lm = new THREE.MeshBasicMaterial(); lm.color.setRGB(5, 5, 5);
+  const add = (w, h, d, x, y, z) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), lm); m.position.set(x, y, z); s.add(m); };
+  add(5, .1, 5, 0, 4.9, 0); add(.1, 3, 4, -4.9, 1, 0); add(.1, 2, 3, 4.9, .5, 1); add(3, 2, .1, 0, 1, -4.9);
+  return pmrem.fromScene(s, .04).texture;
+}
+
 const $ = s => document.querySelector(s);
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 const isMobile = () => innerWidth <= 720;
@@ -269,15 +321,14 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
 const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environment = makeEnv(pmrem);
 scene.fog = new THREE.Fog(0x18294a, 170, 760);
 
 const camera = new THREE.PerspectiveCamera(35, innerWidth / innerHeight, 0.5, 2600);
-const controls = new OrbitControls(camera, canvas);
+const controls = new Orbit(camera, canvas);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.autoRotateSpeed = 0.35;
-controls.enablePan = false;
 
 /* ------------------------------------------------------------------ materials */
 const stdMats = [];
@@ -1225,7 +1276,7 @@ function loop(now){
   const k = 1 - Math.exp(-dt * 6);
   if (Math.abs(view.l - view.tl) > .5 || Math.abs(view.b - view.tb) > .5) { view.l += (view.tl - view.l) * k; view.b += (view.tb - view.b) * k; applyView(); }
   controls.autoRotate = mode === 'tower' && !flying() && !hovered && !hoverPodium && now - lastInteract > 6000 && !reduceMotion;
-  controls.update();
+  if (flying()) { controls.reset(); camera.lookAt(controls.target); } else controls.update();
   sky.position.copy(camera.position);
   hoverUpdate();
   updatePlanGrowth(now);
@@ -1263,4 +1314,5 @@ controls.minDistance = 30; controls.maxDistance = 420; controls.maxPolarAngle = 
 }
 placeSun();
 requestAnimationFrame(loop);
+})();
 </script>
